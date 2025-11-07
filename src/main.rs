@@ -6,7 +6,7 @@ use iced::widget::{button, column, container, row, text, text_input, horizontal_
 use iced::widget::container::Appearance;
 use iced::widget::scrollable;
 use iced::{Color, Border};
-use sysinfo::{System, Pid};
+use sysinfo::{System, Disks, Pid};
 use log::info;
 use std::fs::File;
 use std::io::Write;
@@ -339,21 +339,35 @@ impl Application for LightMon {
     }
 }
 
-// Get fresh system stats (runs in background)
 async fn fetch_system_data() -> (f32, u64, u64, u64, u64) {
     let mut sys = System::new_all();
     sys.refresh_all();
-    
+
+    // CPU
     let cpu = sys.cpus().first().map(|c| c.cpu_usage()).unwrap_or(0.0);
-    let used = sys.used_memory();
-    let total = sys.total_memory();
-    
-    // Simple disk usage calculation (using memory as proxy)
-    let disk_used = used / 1024;
-    let disk_total = total / 1024;
-    
-    (cpu, used, total, disk_used, disk_total)
+
+    // Memory (KB)
+    let used_mem_kb = sys.used_memory();
+    let total_mem_kb = sys.total_memory();
+
+    // Disks (new API: separate Disks struct)
+    let mut disks = Disks::new_with_refreshed_list();
+    disks.refresh();
+
+    let mut total_disk_bytes: u64 = 0;
+    let mut used_disk_bytes: u64 = 0;
+
+    for disk in disks.list() {
+        let t = disk.total_space();
+        let a = disk.available_space();
+        total_disk_bytes = total_disk_bytes.saturating_add(t);
+        used_disk_bytes = used_disk_bytes.saturating_add(t.saturating_sub(a));
+    }
+
+    (cpu, used_mem_kb, total_mem_kb, used_disk_bytes, total_disk_bytes)
 }
+
+
 
 impl LightMon {
     // Kill a process using Windows taskkill command
@@ -391,13 +405,20 @@ impl LightMon {
     // Overview tab - shows system resource usage
     fn view_overview(&self) -> Element<Message> {
         // Calculate percentages and convert units
-        let mem_total_mb = self.memory_total as f64 / 1024.0;
-        let mem_used_mb = self.memory_used as f64 / 1024.0;
-        let mem_percent = (mem_used_mb / mem_total_mb * 100.0).min(100.0);
+        // convert memory KB -> GB
+        let mem_total_gb = (self.memory_total as f64) / 1024.0 / 1024.0;
+        let mem_used_gb  = (self.memory_used as f64)  / 1024.0 / 1024.0;
+        let mem_percent = if mem_total_gb > 0.0 {
+            (mem_used_gb / mem_total_gb * 100.0).min(100.0)
+        } else { 0.0 };
 
-        let disk_total_gb = self.disk_total as f64 / 1024.0;
-        let disk_used_gb = self.disk_used as f64 / 1024.0;
-        let disk_percent = (disk_used_gb / disk_total_gb * 100.0).min(100.0);
+        // convert disk bytes -> GB
+        let disk_total_gb = (self.disk_total as f64) / 1024.0 / 1024.0 / 1024.0;
+        let disk_used_gb  = (self.disk_used as f64)  / 1024.0 / 1024.0 / 1024.0;
+        let disk_percent = if disk_total_gb > 0.0 {
+            (disk_used_gb / disk_total_gb * 100.0).min(100.0)
+        } else { 0.0 };
+
 
         // Create visual progress bars
         let cpu_filled = (self.cpu_usage as usize / 5).min(20);
@@ -455,7 +476,7 @@ impl LightMon {
             stat_box("Memory", mem_bar, mem_percent as f32),
             stat_box("Disk", disk_bar, disk_percent as f32),
             vertical_space().height(Length::Fixed(15.0)),
-            text(format!("Memory: {:.1} / {:.1} GB", mem_used_mb / 1024.0, mem_total_mb / 1024.0))
+            text(format!("Memory: {:.1} / {:.1} GB", mem_used_gb, mem_total_gb))
                 .size(14),
         ]
         .spacing(8)
